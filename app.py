@@ -28,7 +28,7 @@ RESORTS = {
 
 @st.cache_data(ttl=3600)
 def fetch_resort_weather(lat, lon):
-    """Fetches past 7 days and tomorrow's forecast from Open-Meteo API."""
+    """Fetches past 7 days and tomorrow's forecast from Open-Meteo API in standard metric units."""
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}"
@@ -55,8 +55,8 @@ def fetch_resort_weather(lat, lon):
     return None
 
 
-def calculate_powder_score(df):
-    """Calculates a 0-100 powder score based on weather history and forecast."""
+def calculate_powder_score(df, is_imperial=True):
+    """Calculates a 0-100 powder score and formats warnings in the chosen unit system."""
     if df is None or len(df) < 8:
         return 20, "Data error", []
 
@@ -67,7 +67,7 @@ def calculate_powder_score(df):
     score = 50
     warnings = []
 
-    # 1. Snow Accumulation Factor (Last 48h vs older)
+    # 1. Snow Accumulation Factor (Last 48h vs older, calculated in cm)
     recent_snow = (
         df.iloc[-2]["snowfall_sum"] * 3
         + df.iloc[-3]["snowfall_sum"] * 1.5
@@ -90,16 +90,21 @@ def calculate_powder_score(df):
         )
 
     # 3. Wind Hold Risk Check for Tomorrow
-    wind_gust = tomorrow["wind_gust"]
-    if wind_gust > 65:  # km/h (~40 mph)
+    wind_gust_kmh = tomorrow["wind_gust"]
+    if is_imperial:
+        wind_display = f"{wind_gust_kmh * 0.621371:.1f} mph"
+    else:
+        wind_display = f"{wind_gust_kmh:.1f} km/h"
+
+    if wind_gust_kmh > 65:  # ~40 mph
         score -= 25
         warnings.append(
-            f"🔴 High Wind Hold Risk: Gusts expected at {wind_gust} km/h."
+            f"🔴 High Wind Hold Risk: Gusts expected at {wind_display}."
         )
-    elif wind_gust > 50:
+    elif wind_gust_kmh > 50:  # ~31 mph
         score -= 10
         warnings.append(
-            f"🟡 Moderate Wind Risk: Gusts expected at {wind_gust} km/h."
+            f"🟡 Moderate Wind Risk: Gusts expected at {wind_display}."
         )
 
     # Clamp score between 0 and 100
@@ -116,6 +121,37 @@ def calculate_powder_score(df):
     return final_score, status, warnings
 
 
+def format_raw_dataframe(df, is_imperial=True):
+    """Converts and renames raw weather dataframe columns based on selected units."""
+    display_df = df.copy()
+    if is_imperial:
+        display_df["temp_max"] = (display_df["temp_max"] * 9 / 5 + 32).round(1)
+        display_df["temp_min"] = (display_df["temp_min"] * 9 / 5 + 32).round(1)
+        display_df["snowfall_sum"] = (display_df["snowfall_sum"] * 0.393701).round(1)
+        display_df["wind_gust"] = (display_df["wind_gust"] * 0.621371).round(1)
+        return display_df.rename(
+            columns={
+                "date": "Date",
+                "temp_max": "Max Temp (°F)",
+                "temp_min": "Min Temp (°F)",
+                "snowfall_sum": "Snowfall (in)",
+                "wind_gust": "Max Wind Gust (mph)",
+                "cloud_cover": "Cloud Cover (%)",
+            }
+        )
+    else:
+        return display_df.rename(
+            columns={
+                "date": "Date",
+                "temp_max": "Max Temp (°C)",
+                "temp_min": "Min Temp (°C)",
+                "snowfall_sum": "Snowfall (cm)",
+                "wind_gust": "Max Wind Gust (km/h)",
+                "cloud_cover": "Cloud Cover (%)",
+            }
+        )
+
+
 # --- UI LAYOUT ---
 st.title("⛷️ Smart Ski Resort Powder Decision App")
 st.markdown(
@@ -126,6 +162,14 @@ st.markdown(
 
 # Sidebar controls
 st.sidebar.header("Configuration")
+
+unit_choice = st.sidebar.radio(
+    "Measurement Units:",
+    ["Imperial (°F, in, mph)", "Metric (°C, cm, km/h)"],
+    index=0,  # Defaults to Imperial
+)
+is_imperial = unit_choice.startswith("Imperial")
+
 selected_group = st.sidebar.radio(
     "Select Resort List:", list(RESORTS.keys())
 )
@@ -137,7 +181,7 @@ st.markdown("---")
 results = []
 for resort in resort_list:
     df = fetch_resort_weather(resort["lat"], resort["lon"])
-    score, status, warnings = calculate_powder_score(df)
+    score, status, warnings = calculate_powder_score(df, is_imperial=is_imperial)
     results.append({
         "name": resort["name"],
         "score": score,
@@ -173,19 +217,10 @@ for item in results:
             f"📊 Inspect Raw Weather Data for {item['name']} (Past 7 Days + Forecast)"
         ):
             if item["raw_data"] is not None:
-                st.dataframe(
-                    item["raw_data"].rename(
-                        columns={
-                            "date": "Date",
-                            "temp_max": "Max Temp (°C)",
-                            "temp_min": "Min Temp (°C)",
-                            "snowfall_sum": "Snowfall (cm)",
-                            "wind_gust": "Max Wind Gust (km/h)",
-                            "cloud_cover": "Cloud Cover (%)",
-                        }
-                    ),
-                    use_container_width=True,
+                formatted_df = format_raw_dataframe(
+                    item["raw_data"], is_imperial=is_imperial
                 )
+                st.dataframe(formatted_df, use_container_width=True)
             else:
                 st.error("Could not load raw data tables from API.")
 
