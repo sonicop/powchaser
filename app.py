@@ -27,97 +27,93 @@ RESORTS = {
 
 
 @st.cache_data(ttl=3600)
--
 def fetch_resort_weather(lat, lon):
-  """Fetches past 7 days and tomorrow's forecast from Open-Meteo API."""
-  today = datetime.date.today()
-  past_date = today - datetime.timedelta(days=7)
+    """Fetches past 7 days and tomorrow's forecast from Open-Meteo API."""
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}"
+        f"&daily=temperature_2m_max,temperature_2m_min,snowfall_sum,wind_gusts_10m_max,cloud_cover_mean"
+        f"&past_days=7&forecast_days=2&timezone=auto"
+    )
 
-  url = (
-      f"https://api.open-meteo.com/v1/forecast?"
-      f"latitude={lat}&longitude={lon}"
-      f"&daily=temperature_2m_max,temperature_2m_min,snowfall_sum,wind_gusts_10m_max,cloud_cover_mean"
-      f"&past_days=7&forecast_days=2&timezone=auto"
-  )
-
-  try:
-    response = requests.get(url)
-    if response.status_code == 200:
-      data = response.json()
-      daily = data.get("daily", {})
-      df = pd.DataFrame({
-          "date": daily.get("time", []),
-          "temp_max": daily.get("temperature_2m_max", []),
-          "temp_min": daily.get("temperature_2m_min", []),
-          "snowfall_sum": daily.get("snowfall_sum", []),
-          "wind_gust": daily.get("wind_gusts_10m_max", []),
-          "cloud_cover": daily.get("cloud_cover_mean", []),
-      })
-      return df
-  except Exception as e:
-    print(f"Error fetching data: {e}")
-  return None
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            daily = data.get("daily", {})
+            df = pd.DataFrame({
+                "date": daily.get("time", []),
+                "temp_max": daily.get("temperature_2m_max", []),
+                "temp_min": daily.get("temperature_2m_min", []),
+                "snowfall_sum": daily.get("snowfall_sum", []),
+                "wind_gust": daily.get("wind_gusts_10m_max", []),
+                "cloud_cover": daily.get("cloud_cover_mean", []),
+            })
+            return df
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+    return None
 
 
 def calculate_powder_score(df):
-  """Calculates a 0-100 powder score based on weather history and forecast."""
-  if df is None or len(df) < 8:
-    return 20, "Data error", []
+    """Calculates a 0-100 powder score based on weather history and forecast."""
+    if df is None or len(df) < 8:
+        return 20, "Data error", []
 
-  # Split history (past 7 days) and forecast (tomorrow is index 7)
-  history = df.iloc[:-1]
-  tomorrow = df.iloc[-1]
+    # Split history (past 7 days) and forecast (tomorrow is index 7)
+    history = df.iloc[:-1]
+    tomorrow = df.iloc[-1]
 
-  score = 50
-  warnings = []
+    score = 50
+    warnings = []
 
-  # 1. Snow Accumulation Factor (Last 48h vs older)
-  recent_snow = (
-      df.iloc[-2]["snowfall_sum"] * 3
-      + df.iloc[-3]["snowfall_sum"] * 1.5
-      + history["snowfall_sum"].sum() * 0.2
-  )
-  score += min(30, recent_snow * 5)
-
-  # 2. Freeze-Thaw Cycle Check (The Icy Crust Killer)
-  freeze_thaw_count = 0
-  for _, row in history.tail(5).iterrows():
-    if row["temp_max"] > 2.0 and row["temp_min"] < 0:  
-      freeze_thaw_count += 1
-
-  if freeze_thaw_count > 0:
-    penalty = freeze_thaw_count * 12
-    score -= penalty
-    warnings.append(
-        f"⚠️ Freeze-Thaw Risk: Detected {freeze_thaw_count} melt-freeze cycles"
-        " recently (icy base risk)."
+    # 1. Snow Accumulation Factor (Last 48h vs older)
+    recent_snow = (
+        df.iloc[-2]["snowfall_sum"] * 3
+        + df.iloc[-3]["snowfall_sum"] * 1.5
+        + history["snowfall_sum"].sum() * 0.2
     )
+    score += min(30, recent_snow * 5)
 
-  # 3. Wind Hold Risk Check for Tomorrow
-  wind_gust = tomorrow["wind_gust"]
-  if wind_gust > 65:  # km/h (~40 mph)
-    score -= 25
-    warnings.append(
-        f"🔴 High Wind Hold Risk: Gusts expected at {wind_gust} km/h."
-    )
-  elif wind_gust > 50:
-    score -= 10
-    warnings.append(
-        f"🟡 Moderate Wind Risk: Gusts expected at {wind_gust} km/h."
-    )
+    # 2. Freeze-Thaw Cycle Check (The Icy Crust Killer)
+    freeze_thaw_count = 0
+    for _, row in history.tail(5).iterrows():
+        if row["temp_max"] > 2.0 and row["temp_min"] < 0:
+            freeze_thaw_count += 1
 
-  # Clamp score between 0 and 100
-  final_score = max(5, min(100, int(score)))
+    if freeze_thaw_count > 0:
+        penalty = freeze_thaw_count * 12
+        score -= penalty
+        warnings.append(
+            f"⚠️ Freeze-Thaw Risk: Detected {freeze_thaw_count} melt-freeze cycles"
+            " recently (icy base risk)."
+        )
 
-  # Status Badge
-  if final_score >= 70:
-    status = "🟢 GO (Prime Powder)"
-  elif final_score >= 40:
-    status = "🟡 BORDERLINE (Variable Conditions)"
-  else:
-    status = "🔴 SKIP (Icy / Wind / Low Base)"
+    # 3. Wind Hold Risk Check for Tomorrow
+    wind_gust = tomorrow["wind_gust"]
+    if wind_gust > 65:  # km/h (~40 mph)
+        score -= 25
+        warnings.append(
+            f"🔴 High Wind Hold Risk: Gusts expected at {wind_gust} km/h."
+        )
+    elif wind_gust > 50:
+        score -= 10
+        warnings.append(
+            f"🟡 Moderate Wind Risk: Gusts expected at {wind_gust} km/h."
+        )
 
-  return final_score, status, warnings
+    # Clamp score between 0 and 100
+    final_score = max(5, min(100, int(score)))
+
+    # Status Badge
+    if final_score >= 70:
+        status = "🟢 GO (Prime Powder)"
+    elif final_score >= 40:
+        status = "🟡 BORDERLINE (Variable Conditions)"
+    else:
+        status = "🔴 SKIP (Icy / Wind / Low Base)"
+
+    return final_score, status, warnings
 
 
 # --- UI LAYOUT ---
@@ -140,68 +136,57 @@ st.markdown("---")
 # Process each resort
 results = []
 for resort in resort_list:
-  df = fetch_resort_weather(resort["lat"], resort["lon"])
-  score, status, warnings = calculate_powder_score(df)
-  results.append({
-      "name": resort["name"],
-      "score": score,
-      "status": status,
-      "warnings": warnings,
-      "raw_data": df,
-  })
+    df = fetch_resort_weather(resort["lat"], resort["lon"])
+    score, status, warnings = calculate_powder_score(df)
+    results.append({
+        "name": resort["name"],
+        "score": score,
+        "status": status,
+        "warnings": warnings,
+        "raw_data": df,
+    })
 
 # Sort resorts by highest score
 results = sorted(results, key=lambda x: x["score"], reverse=True)
 
 # Render Resort Cards
 for item in results:
-  with st.container():
-    col1, col2, col3 = st.columns([3, 2, 2])
+    with st.container():
+        col1, col2 = st.columns([3, 2])
 
-    with col1:
-      st.subheader(item["name"])
-      st.markdown(f"**Status:** {item['status']}")
-      if item["warnings"]:
-        for w in item["warnings"]:
-          st.caption(w)
-      else:
-        st.caption("✅ Stable base and clean weather metrics.")
+        with col1:
+            st.subheader(item["name"])
+            st.markdown(f"**Status:** {item['status']}")
+            if item["warnings"]:
+                for w in item["warnings"]:
+                    st.caption(w)
+            else:
+                st.caption("✅ Stable base and clean weather metrics.")
 
-    with col2:
-      st.metric(
-          label="Calculated Powder Score", value=f"{item['score']} / 100"
-      )
+        with col2:
+            st.metric(
+                label="Calculated Powder Score", value=f"{item['score']} / 100"
+            )
 
-    with col3:
-      # Expandable raw data section
-      pass
+        # Expander for Raw Data Inspection
+        with st.expander(
+            f"📊 Inspect Raw Weather Data for {item['name']} (Past 7 Days + Forecast)"
+        ):
+            if item["raw_data"] is not None:
+                st.dataframe(
+                    item["raw_data"].rename(
+                        columns={
+                            "date": "Date",
+                            "temp_max": "Max Temp (°C)",
+                            "temp_min": "Min Temp (°C)",
+                            "snowfall_sum": "Snowfall (cm)",
+                            "wind_gust": "Max Wind Gust (km/h)",
+                            "cloud_cover": "Cloud Cover (%)",
+                        }
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.error("Could not load raw data tables from API.")
 
-    # Expander for Raw Data Inspection
-    with st.expander(
-        f"📊 Inspect Raw Weather Data for {item['name']} (Past 7 Days +"
-        " Forecast)"
-    ):
-      if item["raw_data"] is not None:
-        st.dataframe(
-            item["raw_data"].rename(
-                columns={
-                    "date": "Date",
-                    "temp_max": "Max Temp (°C)",
-                    "temp_min": "Min Temp (°C)",
-                    "snowfall_sum": "Snowfall (cm)",
-                    "wind_gust": "Max Wind Gust (km/h)",
-                    "cloud_cover": "Cloud Cover (%)",
-                }
-            ),
-            use_container_width=True,
-        )
-      else:
-        st.error("Could not load raw data tables from API.")
-
-    st.markdown("---")
-
-<Carousel>
-  <Video component_placeholder_id="youtube_video_0" count="1" query="how to read mountain weather forecasts for skiing" source="youtube"/>
-</Carousel>
-
-<FollowUp label="Want me to show you how to deploy this Streamlit app for free on the web?" query="How can I deploy this Streamlit ski app for free online using Streamlit Community Cloud or Vercel?"/>
+        st.markdown("---")
